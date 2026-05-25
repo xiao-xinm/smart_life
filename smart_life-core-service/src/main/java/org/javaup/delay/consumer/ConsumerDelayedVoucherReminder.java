@@ -13,6 +13,7 @@ import org.javaup.entity.UserInfo;
 import org.javaup.model.SeckillVoucherFullModel;
 import org.javaup.redis.RedisCache;
 import org.javaup.redis.RedisKeyBuild;
+import org.javaup.service.IAutoIssueNotifyService;
 import org.javaup.service.ISeckillVoucherService;
 import org.javaup.service.IUserInfoService;
 import org.springframework.beans.factory.annotation.Value;
@@ -51,6 +52,9 @@ public class ConsumerDelayedVoucherReminder implements ConsumerTask {
     
     @Resource
     private IUserInfoService userInfoService;
+
+    @Resource
+    private IAutoIssueNotifyService autoIssueNotifyService;
 
 
     @Value("${seckill.reminder.notify.sms.enabled:false}")
@@ -137,6 +141,13 @@ public class ConsumerDelayedVoucherReminder implements ConsumerTask {
     }
 
     private Set<String> buildAudienceUserIds(SeckillVoucherFullModel voucherFull) {
+        Set<String> subscribedUserIds = readSubscribedUserIds(voucherFull.getVoucherId());
+        if (CollectionUtil.isNotEmpty(subscribedUserIds)) {
+            return subscribedUserIds;
+        }
+        log.info("[DELAY_REMINDER_CONSUMER] 鏃犺闃呯敤鎴凤紝璺宠繃寮€鎶㈡彁閱?voucherId={}", voucherFull.getVoucherId());
+        return Collections.emptySet();
+        /*
         String allowedLevelsStr = voucherFull.getAllowedLevels();
         Integer minLevel = voucherFull.getMinLevel();
         Long shopId = voucherFull.getShopId();
@@ -150,6 +161,29 @@ public class ConsumerDelayedVoucherReminder implements ConsumerTask {
             }
         } else if (topBuyersEnabled) {
             log.warn("[DELAY_REMINDER_CONSUMER] 店铺ID为空，跳过Top买家统计");
+        }
+        return userIds;
+        */
+    }
+
+    private Set<String> readSubscribedUserIds(Long voucherId) {
+        Set<String> userIds = new LinkedHashSet<>();
+        RedisKeyBuild zsetKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_SUBSCRIBE_ZSET_TAG_KEY, voucherId);
+        Set<String> orderedIds = redisCache.getRangeForSortedSet(zsetKey, 0, Math.max(maxNotifyUsers - 1L, 0), String.class);
+        if (CollectionUtil.isNotEmpty(orderedIds)) {
+            userIds.addAll(orderedIds);
+        }
+        if (userIds.size() < maxNotifyUsers) {
+            RedisKeyBuild setKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_SUBSCRIBE_USER_TAG_KEY, voucherId);
+            Set<String> setIds = redisCache.membersForSet(setKey, String.class);
+            if (CollectionUtil.isNotEmpty(setIds)) {
+                for (String userId : setIds) {
+                    if (userIds.size() >= maxNotifyUsers) {
+                        break;
+                    }
+                    userIds.add(userId);
+                }
+            }
         }
         return userIds;
     }
@@ -370,6 +404,11 @@ public class ConsumerDelayedVoucherReminder implements ConsumerTask {
             }
             String notifyContent = String.format("[REMINDER] voucherId=%s userId=%s beginTime=%s",
                     voucherId, userIdStr, beginTime);
+            Long userId = parseUserId(userIdStr);
+            if (userId == null) {
+                continue;
+            }
+            autoIssueNotifyService.sendReminderNotify(voucherId, userId, beginTime);
             if (smsEnabled && StrUtil.isNotBlank(smsTo)) {
                 log.info("[REMINDER_SMS] to={} content={}", smsTo, notifyContent);
             }
@@ -379,6 +418,15 @@ public class ConsumerDelayedVoucherReminder implements ConsumerTask {
             notifyCount++;
         }
         return notifyCount;
+    }
+
+    private Long parseUserId(String userIdStr) {
+        try {
+            return Long.valueOf(userIdStr);
+        } catch (Exception e) {
+            log.warn("[DELAY_REMINDER_CONSUMER] userId瑙ｆ瀽澶辫触 userId={}", userIdStr);
+            return null;
+        }
     }
     
     @Override

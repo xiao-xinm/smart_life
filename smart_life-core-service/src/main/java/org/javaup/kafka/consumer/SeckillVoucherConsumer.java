@@ -187,7 +187,7 @@ public class SeckillVoucherConsumer extends AbstractConsumerHandler<SeckillVouch
                 try {
                     autoIssueNotifyService.sendAutoIssueNotify(voucherId, userId, orderId);
                 } catch (Exception e) {
-                    log.warn("自动发券通知发送失败，voucherId={}, userId={}, orderId={}, err={}",
+                    log.warn("领取结果通知发送失败，voucherId={}, userId={}, orderId={}, err={}",
                             voucherId, userId, orderId, e.getMessage());
                 }
             }

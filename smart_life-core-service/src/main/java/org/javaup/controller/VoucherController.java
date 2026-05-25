@@ -15,8 +15,11 @@ import org.javaup.dto.VoucherSubscribeDto;
 import org.javaup.entity.Voucher;
 import org.javaup.model.SeckillVoucherFullModel;
 import org.javaup.service.ISeckillVoucherService;
+import org.javaup.service.IAutoIssueNotifyService;
 import org.javaup.service.IVoucherService;
+import org.javaup.vo.AutoIssueNotificationVo;
 import org.javaup.vo.GetSubscribeStatusVo;
+import org.javaup.vo.VoucherSubscribeCenterVo;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -41,6 +44,9 @@ public class VoucherController {
     
     @Resource
     private ISeckillVoucherService seckillVoucherService;
+
+    @Resource
+    private IAutoIssueNotifyService autoIssueNotifyService;
     
     @PostMapping("/get")
     public Result<SeckillVoucherFullModel> get(@Valid @RequestBody GetSeckillVoucherDto getSeckillVoucherDto) {
@@ -96,6 +102,27 @@ public class VoucherController {
     @PostMapping("/get/subscribe/status/batch")
     public Result<List<GetSubscribeStatusVo>> getSubscribeStatusBatch(@Valid @RequestBody VoucherSubscribeBatchDto voucherSubscribeBatchDto){
         return Result.ok(voucherService.getSubscribeStatusBatch(voucherSubscribeBatchDto));
+    }
+
+    @GetMapping("/subscribe/list")
+    public Result<List<VoucherSubscribeCenterVo>> listSubscribeCenter(){
+        return Result.ok(voucherService.listSubscribeCenter());
+    }
+
+    @GetMapping("/notifications")
+    public Result<List<AutoIssueNotificationVo>> listNotifications(){
+        return Result.ok(autoIssueNotifyService.listNotifications(20));
+    }
+
+    @GetMapping("/notifications/unread")
+    public Result<List<AutoIssueNotificationVo>> listUnreadNotifications(){
+        return Result.ok(autoIssueNotifyService.listUnreadNotifications(5));
+    }
+
+    @PostMapping("/notifications/read")
+    public Result<Void> markNotificationsRead(){
+        autoIssueNotifyService.markAllRead();
+        return Result.ok();
     }
     
     @PostMapping("/delay/voucher/reminder")

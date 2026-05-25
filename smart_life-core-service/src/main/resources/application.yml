@@ -12,8 +12,9 @@ spring:
   data:
     redis:
       database: 0
-      host: 127.0.0.1
+      host: 101.43.18.188
       port: 6379
+      password: 123456
   mvc:
     pathmatch:
       matching-strategy: ant_path_matcher
@@ -25,7 +26,7 @@ spring:
     generator:
       WRITE_NUMBERS_AS_STRINGS: true
   kafka:
-    bootstrap-servers: localhost:9092
+    bootstrap-servers: 101.43.18.188:9092
     producer:
       retries: 1
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
@@ -45,7 +46,8 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer  
 mybatis-plus:
-  type-aliases-package: org.javaup.entity # 别名扫描?  configuration:
+  type-aliases-package: org.javaup.entity # 别名扫描?
+  configuration:
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
     local-cache-scope: statement
 logging:
@@ -72,4 +74,7 @@ management:
   endpoint:
     prometheus:
       enabled: true
-      
+agent:
+  python:
+    enabled: true
+    chat-url: http://localhost:8000/chat

@@ -64,6 +64,12 @@ public enum RedisKeyManage {
     SECKILL_SUBSCRIBE_ZSET_TAG_KEY("seckill:subscribe:zset:{%s}","秒杀券id（同槽位HashTag）","value为订阅队列，member为用户id，score为加入时间戳","k"),
     
     SECKILL_SUBSCRIBE_STATUS_TAG_KEY("seckill:subscribe:status:{%s}","秒杀券id（同槽位HashTag）","value为用户订阅状态HASH，field为用户id，value为状态码","k"),
+
+    SECKILL_SUBSCRIBE_USER_INDEX_KEY("seckill:subscribe:user:index:%s","用户id","value为用户订阅过的秒杀券id集合","k"),
+
+    SMART_LIFE_NOTIFY_LIST_KEY("smartlife:notify:list:%s","用户id","value为站内通知列表","k"),
+
+    SMART_LIFE_NOTIFY_READ_HASH_KEY("smartlife:notify:read:%s","用户id","value为通知已读状态HASH","k"),
     
     SECKILL_SHOP_TOP_BUYERS_DAILY_TAG_KEY("seckill:shop:topbuyers:daily:{%s}:%s","商铺id（同槽位HashTag）与日期(yyyyMMdd)","ZSET，member为用户id，score为购买次数","k"),
     

@@ -4,6 +4,11 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 logs/
+node_modules/
+dist/
+.npm-cache/
+__pycache__/
+*.py[cod]
 
 **/dependency-reduced-pom.xml
 

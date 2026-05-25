@@ -21,8 +21,11 @@ import org.javaup.dto.VoucherDto;
 import org.javaup.dto.VoucherSubscribeBatchDto;
 import org.javaup.dto.VoucherSubscribeDto;
 import org.javaup.entity.SeckillVoucher;
+import org.javaup.entity.Shop;
 import org.javaup.entity.Voucher;
+import org.javaup.entity.VoucherOrder;
 import org.javaup.enums.BaseCode;
+import org.javaup.enums.OrderStatus;
 import org.javaup.enums.StockUpdateType;
 import org.javaup.enums.SubscribeStatus;
 import org.javaup.exception.SmartLifeFrameException;
@@ -31,6 +34,7 @@ import org.javaup.mapper.VoucherMapper;
 import org.javaup.redis.RedisCache;
 import org.javaup.redis.RedisKeyBuild;
 import org.javaup.service.ISeckillVoucherService;
+import org.javaup.service.IShopService;
 import org.javaup.service.IVoucherOrderService;
 import org.javaup.service.IVoucherService;
 import org.javaup.servicelock.LockType;
@@ -38,6 +42,7 @@ import org.javaup.servicelock.annotion.ServiceLock;
 import org.javaup.toolkit.SnowflakeIdGenerator;
 import org.javaup.utils.UserHolder;
 import org.javaup.vo.GetSubscribeStatusVo;
+import org.javaup.vo.VoucherSubscribeCenterVo;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -45,15 +50,20 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 import java.util.concurrent.TimeUnit;
 
 import static org.javaup.constant.Constant.BLOOM_FILTER_HANDLER_VOUCHER;
 import static org.javaup.constant.Constant.DELAY_VOUCHER_REMINDER;
 import static org.javaup.constant.DistributedLockConstants.UPDATE_SECKILL_VOUCHER_LOCK;
 import static org.javaup.constant.DistributedLockConstants.UPDATE_SECKILL_VOUCHER_STOCK_LOCK;
-import static org.javaup.service.impl.VoucherOrderServiceImpl.SECKILL_ORDER_EXECUTOR;
 import static org.javaup.utils.RedisConstants.SECKILL_STOCK_KEY;
 
 /**
@@ -84,6 +94,9 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     
     @Resource
     private IVoucherOrderService voucherOrderService;
+
+    @Resource
+    private IShopService shopService;
     
     @Resource
     private DelayQueueContext delayQueueContext;
@@ -240,11 +253,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
                 newInitStock,
                 newRedisStock
                 );
-        //如果是增加库?尝试将资格自动分配给订阅队列中最早的未购用户
-        if (stockUpdateType == StockUpdateType.INCREASE) {
-            SECKILL_ORDER_EXECUTOR.execute(() -> voucherOrderService
-                    .autoIssueVoucherToEarliestSubscriber(seckillVoucher.getVoucherId(),null));
-        }
+        // 库存恢复只更新库存。订阅用户到点提醒后由用户主动抢券，不再自动帮抢。
     }
     
     @Override
@@ -279,6 +288,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         
         
         RedisKeyBuild statusKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_SUBSCRIBE_STATUS_TAG_KEY, voucherId);
+        addSubscribeIndex(userId, voucherId, ttlSeconds);
         if (purchased) {
             redisCache.putHash(statusKey, userIdStr, SubscribeStatus.SUCCESS.getCode(), ttlSeconds, TimeUnit.SECONDS);
             redisCache.expire(statusKey, ttlSeconds, TimeUnit.SECONDS);
@@ -333,6 +343,12 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         if (ttlSeconds == null || ttlSeconds <= 0) {
             ttlSeconds = 3600L;
         }
+        if (!purchased) {
+            redisCache.removeForSet(
+                    RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_SUBSCRIBE_USER_INDEX_KEY, userId),
+                    String.valueOf(voucherId)
+            );
+        }
         redisCache.putHash(
                 statusKey, 
                 userIdStr,
@@ -346,28 +362,25 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         Long voucherId = voucherSubscribeDto.getVoucherId();
         Long userId = UserHolder.getUser().getId();
         String userIdStr = String.valueOf(userId);
-
         RedisKeyBuild statusKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_SUBSCRIBE_STATUS_TAG_KEY, voucherId);
-        Integer st = redisCache.getForHash(statusKey, userIdStr, Integer.class);
-        if (st != null) {
-            return st;
-        }
-        
+
         boolean purchased = Boolean.TRUE.equals(redisCache.isMemberForSet(
                 RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_USER_TAG_KEY, voucherId),
                 userIdStr
         ));
         if (purchased) {
-            Long ttlSeconds = redisCache.getExpire(
-                    RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_VOUCHER_TAG_KEY, voucherId),
-                    TimeUnit.SECONDS
-            );
-            if (ttlSeconds == null || ttlSeconds <= 0) {
-                ttlSeconds = 3600L;
-            }
-            redisCache.putHash(statusKey, userIdStr, SubscribeStatus.SUCCESS.getCode(), ttlSeconds, TimeUnit.SECONDS);
-            redisCache.expire(statusKey, ttlSeconds, TimeUnit.SECONDS);
+            cacheSubscribeSuccess(voucherId, userId, userIdStr, statusKey);
             return SubscribeStatus.SUCCESS.getCode();
+        }
+
+        if (hasNormalVoucherOrder(userId, voucherId)) {
+            cacheSubscribeSuccess(voucherId, userId, userIdStr, statusKey);
+            return SubscribeStatus.SUCCESS.getCode();
+        }
+
+        Integer st = redisCache.getForHash(statusKey, userIdStr, Integer.class);
+        if (st != null) {
+            return st;
         }
         
         boolean inQueue = Boolean.TRUE.equals(redisCache.isMemberForSet(
@@ -383,28 +396,24 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         String userIdStr = String.valueOf(userId);
         List<GetSubscribeStatusVo> res = new ArrayList<>();
         for (Long voucherId : voucherSubscribeBatchDto.getVoucherIdList()) {
-            // 优先使用HASH缓存
             RedisKeyBuild statusKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_SUBSCRIBE_STATUS_TAG_KEY, voucherId);
-            Integer st = redisCache.getForHash(statusKey, userIdStr, Integer.class);
-            if (st != null) {
-                res.add(new GetSubscribeStatusVo(voucherId, st));
-                continue;
-            }
             boolean purchased = Boolean.TRUE.equals(redisCache.isMemberForSet(
                     RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_USER_TAG_KEY, voucherId),
                     userIdStr
             ));
             if (purchased) {
-                Long ttlSeconds = redisCache.getExpire(
-                        RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_VOUCHER_TAG_KEY, voucherId),
-                        TimeUnit.SECONDS
-                );
-                if (ttlSeconds == null || ttlSeconds <= 0) {
-                    ttlSeconds = 3600L;
-                }
-                redisCache.putHash(statusKey, userIdStr, SubscribeStatus.SUCCESS.getCode(), ttlSeconds, TimeUnit.SECONDS);
-                redisCache.expire(statusKey, ttlSeconds, TimeUnit.SECONDS);
+                cacheSubscribeSuccess(voucherId, userId, userIdStr, statusKey);
                 res.add(new GetSubscribeStatusVo(voucherId, SubscribeStatus.SUCCESS.getCode()));
+                continue;
+            }
+            if (hasNormalVoucherOrder(userId, voucherId)) {
+                cacheSubscribeSuccess(voucherId, userId, userIdStr, statusKey);
+                res.add(new GetSubscribeStatusVo(voucherId, SubscribeStatus.SUCCESS.getCode()));
+                continue;
+            }
+            Integer st = redisCache.getForHash(statusKey, userIdStr, Integer.class);
+            if (st != null) {
+                res.add(new GetSubscribeStatusVo(voucherId, st));
                 continue;
             }
             boolean inQueue = Boolean.TRUE.equals(redisCache.isMemberForSet(
@@ -414,6 +423,154 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
             res.add(new GetSubscribeStatusVo(voucherId, inQueue ? SubscribeStatus.SUBSCRIBED.getCode() : SubscribeStatus.UNSUBSCRIBED.getCode()));
         }
         return res;
+    }
+
+    private boolean hasNormalVoucherOrder(Long userId, Long voucherId) {
+        Long count = voucherOrderService.lambdaQuery()
+                .eq(VoucherOrder::getUserId, userId)
+                .eq(VoucherOrder::getVoucherId, voucherId)
+                .eq(VoucherOrder::getStatus, OrderStatus.NORMAL.getCode())
+                .count();
+        return count != null && count > 0;
+    }
+
+    private void cacheSubscribeSuccess(Long voucherId, Long userId, String userIdStr, RedisKeyBuild statusKey) {
+        Long ttlSeconds = redisCache.getExpire(
+                RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_VOUCHER_TAG_KEY, voucherId),
+                TimeUnit.SECONDS
+        );
+        if (ttlSeconds == null || ttlSeconds <= 0) {
+            ttlSeconds = 3600L;
+        }
+        redisCache.addForSet(
+                RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_USER_TAG_KEY, voucherId),
+                userIdStr
+        );
+        redisCache.putHash(statusKey, userIdStr, SubscribeStatus.SUCCESS.getCode(), ttlSeconds, TimeUnit.SECONDS);
+        redisCache.expire(statusKey, ttlSeconds, TimeUnit.SECONDS);
+        addSubscribeIndex(userId, voucherId, ttlSeconds);
+    }
+
+    @Override
+    public List<VoucherSubscribeCenterVo> listSubscribeCenter() {
+        Long userId = UserHolder.getUser().getId();
+        List<Voucher> vouchers = listSubscribeCenterVouchers(userId);
+        if (vouchers.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Map<Long, Shop> shopMap = loadShopMap(vouchers);
+        List<VoucherSubscribeCenterVo> result = new ArrayList<>();
+        for (Voucher voucher : vouchers) {
+            VoucherSubscribeDto dto = new VoucherSubscribeDto();
+            dto.setVoucherId(voucher.getId());
+            Integer status = getSubscribeStatus(dto);
+            if (status == null || SubscribeStatus.UNSUBSCRIBED.getCode().equals(status)) {
+                redisCache.removeForSet(
+                        RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_SUBSCRIBE_USER_INDEX_KEY, userId),
+                        String.valueOf(voucher.getId())
+                );
+                continue;
+            }
+            result.add(buildSubscribeCenterItem(voucher, shopMap.get(voucher.getShopId()), status, userId));
+        }
+        return result;
+    }
+
+    private List<Voucher> listSubscribeCenterVouchers(Long userId) {
+        Map<Long, Voucher> voucherMap = new LinkedHashMap<>();
+        Set<String> indexedVoucherIds = redisCache.membersForSet(
+                RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_SUBSCRIBE_USER_INDEX_KEY, userId),
+                String.class
+        );
+        if (indexedVoucherIds != null && !indexedVoucherIds.isEmpty()) {
+            List<Long> ids = indexedVoucherIds.stream()
+                    .map(this::parseVoucherId)
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .toList();
+            if (!ids.isEmpty()) {
+                listByIds(ids).forEach(voucher -> voucherMap.put(voucher.getId(), voucher));
+            }
+        }
+        List<Long> purchasedVoucherIds = voucherOrderService.lambdaQuery()
+                .eq(VoucherOrder::getUserId, userId)
+                .eq(VoucherOrder::getStatus, OrderStatus.NORMAL.getCode())
+                .last("limit 200")
+                .list()
+                .stream()
+                .map(VoucherOrder::getVoucherId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (!purchasedVoucherIds.isEmpty()) {
+            listByIds(purchasedVoucherIds).forEach(voucher -> voucherMap.putIfAbsent(voucher.getId(), voucher));
+        }
+        lambdaQuery()
+                .last("limit 500")
+                .list()
+                .forEach(voucher -> voucherMap.putIfAbsent(voucher.getId(), voucher));
+        return new ArrayList<>(voucherMap.values());
+    }
+
+    private Long parseVoucherId(String voucherId) {
+        try {
+            return Long.valueOf(voucherId);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void addSubscribeIndex(Long userId, Long voucherId, Long ttlSeconds) {
+        RedisKeyBuild indexKey = RedisKeyBuild.createRedisKey(RedisKeyManage.SECKILL_SUBSCRIBE_USER_INDEX_KEY, userId);
+        redisCache.addForSet(indexKey, String.valueOf(voucherId));
+        redisCache.expire(indexKey, ttlSeconds, TimeUnit.SECONDS);
+    }
+
+    private Map<Long, Shop> loadShopMap(List<Voucher> vouchers) {
+        List<Long> shopIds = vouchers.stream()
+                .map(Voucher::getShopId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (shopIds.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        return shopService.listByIds(shopIds).stream()
+                .collect(Collectors.toMap(Shop::getId, Function.identity(), (left, right) -> left));
+    }
+
+    private VoucherSubscribeCenterVo buildSubscribeCenterItem(Voucher voucher, Shop shop, Integer status, Long userId) {
+        VoucherSubscribeCenterVo item = new VoucherSubscribeCenterVo();
+        item.setVoucherId(voucher.getId());
+        item.setShopId(voucher.getShopId());
+        if (shop != null) {
+            item.setShopName(shop.getName());
+            item.setShopArea(shop.getArea());
+            item.setShopAddress(shop.getAddress());
+            item.setShopImages(shop.getImages());
+        }
+        item.setVoucherTitle(voucher.getTitle());
+        item.setVoucherSubTitle(voucher.getSubTitle());
+        item.setVoucherRules(voucher.getRules());
+        item.setPayValue(voucher.getPayValue());
+        item.setActualValue(voucher.getActualValue());
+        item.setSubscribeStatus(status);
+        item.setCreateTime(voucher.getCreateTime());
+        item.setUpdateTime(voucher.getUpdateTime());
+        if (SubscribeStatus.SUCCESS.getCode().equals(status)) {
+            VoucherOrder order = voucherOrderService.lambdaQuery()
+                    .eq(VoucherOrder::getUserId, userId)
+                    .eq(VoucherOrder::getVoucherId, voucher.getId())
+                    .eq(VoucherOrder::getStatus, OrderStatus.NORMAL.getCode())
+                    .orderByDesc(VoucherOrder::getCreateTime)
+                    .last("limit 1")
+                    .one();
+            if (order != null) {
+                item.setOrderId(order.getId());
+            }
+        }
+        return item;
     }
     
     public Long doAddSeckillVoucherV1(SeckillVoucherDto seckillVoucherDto) {

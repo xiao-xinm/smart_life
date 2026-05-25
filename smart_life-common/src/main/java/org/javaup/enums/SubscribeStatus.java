@@ -13,9 +13,9 @@ public enum SubscribeStatus {
      * */
     UNSUBSCRIBED(0, "已取消订阅或未订阅"),
     
-    SUBSCRIBED(1, "已订阅到券提醒（在队列中）"),
+    SUBSCRIBED(1, "已订阅开抢提醒"),
     
-    SUCCESS(2,"自动发券已成功（已创建订单）")
+    SUCCESS(2,"已领取（已创建订单）")
     ;
     
     @Getter

@@ -11,6 +11,7 @@ import org.javaup.dto.VoucherSubscribeBatchDto;
 import org.javaup.dto.VoucherSubscribeDto;
 import org.javaup.entity.Voucher;
 import org.javaup.vo.GetSubscribeStatusVo;
+import org.javaup.vo.VoucherSubscribeCenterVo;
 
 import java.util.List;
 
@@ -38,6 +39,8 @@ public interface IVoucherService extends IService<Voucher> {
     Integer getSubscribeStatus(VoucherSubscribeDto voucherSubscribeDto);
     
     List<GetSubscribeStatusVo> getSubscribeStatusBatch(VoucherSubscribeBatchDto voucherSubscribeBatchDto);
+
+    List<VoucherSubscribeCenterVo> listSubscribeCenter();
     
     void delayVoucherReminder(DelayVoucherReminderDto delayVoucherReminderDto);
 }

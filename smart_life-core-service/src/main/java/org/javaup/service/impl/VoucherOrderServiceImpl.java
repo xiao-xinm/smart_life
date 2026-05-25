@@ -19,6 +19,7 @@ import org.javaup.dto.GetVoucherOrderDto;
 import org.javaup.dto.Result;
 import org.javaup.dto.VoucherReconcileLogDto;
 import org.javaup.entity.SeckillVoucher;
+import org.javaup.entity.Shop;
 import org.javaup.entity.UserInfo;
 import org.javaup.entity.Voucher;
 import org.javaup.entity.VoucherOrder;
@@ -42,6 +43,7 @@ import org.javaup.redis.RedisCacheImpl;
 import org.javaup.redis.RedisKeyBuild;
 import org.javaup.repeatexecutelimit.annotion.RepeatExecuteLimit;
 import org.javaup.service.ISeckillVoucherService;
+import org.javaup.service.IShopService;
 import org.javaup.service.IUserInfoService;
 import org.javaup.service.IVoucherOrderRouterService;
 import org.javaup.service.IVoucherOrderService;
@@ -50,6 +52,7 @@ import org.javaup.service.IVoucherService;
 import org.javaup.toolkit.SnowflakeIdGenerator;
 import org.javaup.utils.RedisIdWorker;
 import org.javaup.utils.UserHolder;
+import org.javaup.vo.MyVoucherOrderVo;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.aop.framework.AopContext;
@@ -74,6 +77,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -94,6 +98,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Resource
     private IVoucherService voucherService;
+
+    @Resource
+    private IShopService shopService;
     
     @Resource
     private ISeckillVoucherService seckillVoucherService;
@@ -469,13 +476,13 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     public boolean createVoucherOrderV2(MessageExtend<SeckillVoucherMessage> message) {
         SeckillVoucherMessage messageBody = message.getMessageBody();
         Long userId = messageBody.getUserId();
-        VoucherOrder normalVoucherOrder = lambdaQuery()
+        Long normalVoucherOrderCount = lambdaQuery()
                 .eq(VoucherOrder::getVoucherId, messageBody.getVoucherId())
                 .eq(VoucherOrder::getUserId, userId)
                 .eq(VoucherOrder::getStatus,OrderStatus.NORMAL.getCode())
-                .one();
-        if (Objects.nonNull(normalVoucherOrder)) {
-            log.warn("已存在此订单，voucherId：{},userId：{}", normalVoucherOrder.getVoucherId(), userId);
+                .count();
+        if (normalVoucherOrderCount > 0) {
+            log.warn("已存在有效订单，voucherId={}, userId={}", messageBody.getVoucherId(), userId);
             throw new SmartLifeFrameException(BaseCode.VOUCHER_ORDER_EXIST);
         }
         boolean success = seckillVoucherService.update()
@@ -541,11 +548,84 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 .eq(VoucherOrder::getUserId, UserHolder.getUser().getId())
                 .eq(VoucherOrder::getVoucherId, getVoucherOrderByVoucherIdDto.getVoucherId())
                 .eq(VoucherOrder::getStatus, OrderStatus.NORMAL.getCode())
+                .orderByDesc(VoucherOrder::getCreateTime)
+                .last("limit 1")
                 .one();
         if (Objects.nonNull(voucherOrder)) {
             return voucherOrder.getId();
         }
         return null;
+    }
+
+    @Override
+    public List<MyVoucherOrderVo> listMyVoucherOrders() {
+        Long userId = UserHolder.getUser().getId();
+        List<VoucherOrder> orders = lambdaQuery()
+                .eq(VoucherOrder::getUserId, userId)
+                .eq(VoucherOrder::getStatus, OrderStatus.NORMAL.getCode())
+                .orderByDesc(VoucherOrder::getCreateTime)
+                .last("limit 100")
+                .list();
+        if (CollectionUtil.isEmpty(orders)) {
+            return Collections.emptyList();
+        }
+        Map<Long, Voucher> voucherMap = loadOrderVoucherMap(orders);
+        Map<Long, Shop> shopMap = loadOrderShopMap(voucherMap);
+        return orders.stream()
+                .map(order -> buildMyVoucherOrder(order, voucherMap.get(order.getVoucherId()), shopMap))
+                .collect(Collectors.toList());
+    }
+
+    private Map<Long, Voucher> loadOrderVoucherMap(List<VoucherOrder> orders) {
+        List<Long> voucherIds = orders.stream()
+                .map(VoucherOrder::getVoucherId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .collect(Collectors.toList());
+        if (CollectionUtil.isEmpty(voucherIds)) {
+            return Collections.emptyMap();
+        }
+        return voucherService.listByIds(voucherIds).stream()
+                .collect(Collectors.toMap(Voucher::getId, Function.identity(), (left, right) -> left));
+    }
+
+    private Map<Long, Shop> loadOrderShopMap(Map<Long, Voucher> voucherMap) {
+        List<Long> shopIds = voucherMap.values().stream()
+                .map(Voucher::getShopId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .collect(Collectors.toList());
+        if (CollectionUtil.isEmpty(shopIds)) {
+            return Collections.emptyMap();
+        }
+        return shopService.listByIds(shopIds).stream()
+                .collect(Collectors.toMap(Shop::getId, Function.identity(), (left, right) -> left));
+    }
+
+    private MyVoucherOrderVo buildMyVoucherOrder(VoucherOrder order, Voucher voucher, Map<Long, Shop> shopMap) {
+        MyVoucherOrderVo item = new MyVoucherOrderVo();
+        item.setOrderId(order.getId());
+        item.setVoucherId(order.getVoucherId());
+        item.setOrderStatus(order.getStatus());
+        item.setOrderStatusText(OrderStatus.getMsg(order.getStatus()));
+        item.setCreateTime(order.getCreateTime());
+        item.setPayTime(order.getPayTime());
+        item.setUseTime(order.getUseTime());
+        if (voucher != null) {
+            item.setShopId(voucher.getShopId());
+            item.setVoucherTitle(voucher.getTitle());
+            item.setVoucherSubTitle(voucher.getSubTitle());
+            item.setVoucherRules(voucher.getRules());
+            item.setPayValue(voucher.getPayValue());
+            item.setActualValue(voucher.getActualValue());
+            Shop shop = shopMap.get(voucher.getShopId());
+            if (shop != null) {
+                item.setShopName(shop.getName());
+                item.setShopArea(shop.getArea());
+                item.setShopAddress(shop.getAddress());
+            }
+        }
+        return item;
     }
     
     @Override
@@ -555,6 +635,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 .eq(VoucherOrder::getUserId, UserHolder.getUser().getId())
                 .eq(VoucherOrder::getVoucherId, cancelVoucherOrderDto.getVoucherId())
                 .eq(VoucherOrder::getStatus, OrderStatus.NORMAL.getCode())
+                .orderByDesc(VoucherOrder::getCreateTime)
+                .last("limit 1")
                 .one();
         if (Objects.isNull(voucherOrder)) {
             throw new SmartLifeFrameException(BaseCode.SECKILL_VOUCHER_ORDER_NOT_EXIST);
@@ -610,15 +692,6 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                         day
                 );
                 redisCache.incrementScoreForSortedSet(dailyKey, String.valueOf(voucherOrder.getUserId()), -1.0);
-            }
-            
-            try {
-                autoIssueVoucherToEarliestSubscriber(
-                        voucherOrder.getVoucherId(), 
-                        voucherOrder.getUserId()
-                );
-            } catch (Exception e) {
-                log.warn("自动发券失败，voucherId={}, err=\n{}", voucherOrder.getVoucherId(), e.getMessage());
             }
         }
         return result;
@@ -690,7 +763,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         try {
             verifyUserLevel(seckillVoucherFullModel, candidateUserId);
         } catch (Exception e) {
-            log.info("候选用户不满足人群规则，自动发券跳过。voucherId={}, userId={}", voucherId, candidateUserId);
+            log.info("候选用户不满足人群规则，自动领取跳过。voucherId={}, userId={}", voucherId, candidateUserId);
             return false;
         }
         List<String> keys = buildSeckillKeys(voucherId);
@@ -699,7 +772,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         String[] args = buildSeckillArgs(voucherId, candidateUserIdStr, seckillVoucherFullModel, orderId, traceId);
         SeckillVoucherDomain domain = seckillVoucherOperate.execute(keys, args);
         if (!Objects.equals(domain.getCode(), BaseCode.SUCCESS.getCode())) {
-            log.info("自动发券Lua扣减失败，code={}, voucherId={}, userId={}", domain.getCode(), voucherId, candidateUserId);
+            log.info("自动领取Lua扣减失败，code={}, voucherId={}, userId={}", domain.getCode(), voucherId, candidateUserId);
             return false;
         }
         SeckillVoucherMessage message = new SeckillVoucherMessage(

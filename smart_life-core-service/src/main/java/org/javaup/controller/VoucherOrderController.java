@@ -13,6 +13,7 @@ import org.javaup.service.IReconciliationTaskService;
 import org.javaup.service.ISeckillAccessTokenService;
 import org.javaup.service.IVoucherOrderService;
 import org.javaup.utils.UserHolder;
+import org.javaup.vo.MyVoucherOrderVo;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,6 +21,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 
 /**
@@ -72,6 +75,11 @@ public class VoucherOrderController {
     @PostMapping("/get/seckill/voucher/order-id/by/voucher-id")
     public Result<Long> getSeckillVoucherOrderIdByVoucherId(@Valid @RequestBody GetVoucherOrderByVoucherIdDto getVoucherOrderByVoucherIdDto) {
         return Result.ok(voucherOrderService.getSeckillVoucherOrderIdByVoucherId(getVoucherOrderByVoucherIdDto));
+    }
+
+    @GetMapping("/my")
+    public Result<List<MyVoucherOrderVo>> listMyVoucherOrders() {
+        return Result.ok(voucherOrderService.listMyVoucherOrders());
     }
     
     @PostMapping("/cancel")
