@@ -89,9 +89,8 @@ import static org.javaup.constant.Constant.SECKILL_VOUCHER_TOPIC;
 import static org.javaup.constant.RepeatExecuteLimitConstants.SECKILL_VOUCHER_ORDER;
 
 /**
- * @program: 黑马点评-plus升级版实战项目。添?阿星不是程序?微信，添加时备注 点评 来获取项目的完整资料
  * @description: 优惠券订?接口实现
- * @author: 阿星不是程序? **/
+ **/
 @Slf4j
 @Service
 public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, VoucherOrder> implements IVoucherOrderService {

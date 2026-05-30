@@ -8,12 +8,17 @@ import org.javaup.agent.dto.AgentChatRequest;
 import org.javaup.agent.dto.AgentChatResponse;
 import org.javaup.agent.dto.AgentRecommendation;
 import org.javaup.agent.dto.AgentToolRequest;
+import org.javaup.agent.dto.AgentVectorDoc;
 import org.javaup.agent.dto.AgentVoucherView;
 import org.javaup.agent.service.AgentGuideService;
 import org.javaup.dto.VoucherSubscribeDto;
+import org.javaup.entity.Blog;
 import org.javaup.entity.Shop;
+import org.javaup.entity.ShopType;
 import org.javaup.entity.Voucher;
+import org.javaup.service.IBlogService;
 import org.javaup.service.IShopService;
+import org.javaup.service.IShopTypeService;
 import org.javaup.service.IVoucherService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -32,6 +37,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
@@ -50,6 +56,12 @@ public class AgentGuideServiceImpl implements AgentGuideService {
     @Resource
     private IVoucherService voucherService;
 
+    @Resource
+    private IShopTypeService shopTypeService;
+
+    @Resource
+    private IBlogService blogService;
+
     @Value("${agent.python.enabled:false}")
     private boolean pythonAgentEnabled;
 
@@ -58,6 +70,27 @@ public class AgentGuideServiceImpl implements AgentGuideService {
 
     @Value("${agent.python.stream-url:http://localhost:8000/chat/stream}")
     private String pythonAgentStreamUrl;
+
+    @Value("${agent.rag.enabled:true}")
+    private boolean ragEnabled;
+
+    @Value("${agent.rag.vector-docs-limit:1000}")
+    private int vectorDocsLimit;
+
+    @Value("${agent.rag.include-shop-types:true}")
+    private boolean includeShopTypes;
+
+    @Value("${agent.rag.include-shops:true}")
+    private boolean includeShops;
+
+    @Value("${agent.rag.include-vouchers:true}")
+    private boolean includeVouchers;
+
+    @Value("${agent.rag.include-blogs:true}")
+    private boolean includeBlogs;
+
+    @Value("${agent.rag.include-faq:true}")
+    private boolean includeFaq;
 
     private final RestTemplate restTemplate = createRestTemplate();
 
@@ -104,19 +137,49 @@ public class AgentGuideServiceImpl implements AgentGuideService {
         Integer current = request == null || request.getCurrent() == null ? 1 : request.getCurrent();
         Long maxAvgPrice = request == null ? null : request.getMaxAvgPrice();
         boolean requireVoucher = request != null && Boolean.TRUE.equals(request.getRequireVoucher());
+        List<Long> candidateShopIds = normalizeIds(request == null ? null : request.getCandidateShopIds());
+        List<Long> candidateTypeIds = normalizeIds(request == null ? null : request.getCandidateTypeIds());
+        List<Long> candidateVoucherIds = normalizeIds(request == null ? null : request.getCandidateVoucherIds());
         if (requireVoucher) {
-            return searchVoucherBackedShops(keyword, typeId, maxAvgPrice);
+            return searchVoucherBackedShops(keyword, typeId, maxAvgPrice, candidateShopIds, candidateTypeIds, candidateVoucherIds);
         }
         Page<Shop> page = new Page<>(current, 3);
         List<Shop> shops = shopService.query()
                 .like(keyword != null && !keyword.isBlank(), "name", keyword)
                 .eq(typeId != null, "type_id", typeId)
+                .in(typeId == null && !candidateTypeIds.isEmpty(), "type_id", candidateTypeIds)
+                .in(!candidateShopIds.isEmpty(), "id", candidateShopIds)
                 .le(maxAvgPrice != null, "avg_price", maxAvgPrice)
                 .orderByDesc("score")
                 .orderByDesc("sold")
                 .page(page)
                 .getRecords();
         return shops.stream().map(this::toRecommendation).toList();
+    }
+
+    @Override
+    public List<AgentVectorDoc> listVectorDocs() {
+        if (!ragEnabled) {
+            return List.of();
+        }
+        int limit = Math.max(vectorDocsLimit, 1);
+        List<AgentVectorDoc> docs = new ArrayList<>();
+        if (includeShopTypes) {
+            appendShopTypeDocs(docs, limit);
+        }
+        if (includeShops) {
+            appendShopDocs(docs, limit);
+        }
+        if (includeVouchers) {
+            appendVoucherDocs(docs, limit);
+        }
+        if (includeBlogs) {
+            appendBlogDocs(docs, limit);
+        }
+        if (includeFaq) {
+            appendFaqDocs(docs, limit);
+        }
+        return docs.size() <= limit ? docs : docs.subList(0, limit);
     }
 
     @Override
@@ -132,9 +195,18 @@ public class AgentGuideServiceImpl implements AgentGuideService {
         return vouchers.stream().map(this::toVoucherView).toList();
     }
 
-    private List<AgentRecommendation> searchVoucherBackedShops(String keyword, Integer typeId, Long maxAvgPrice) {
+    private List<AgentRecommendation> searchVoucherBackedShops(
+            String keyword,
+            Integer typeId,
+            Long maxAvgPrice,
+            List<Long> candidateShopIds,
+            List<Long> candidateTypeIds,
+            List<Long> candidateVoucherIds
+    ) {
         List<Voucher> vouchers = voucherService.query()
                 .eq("status", 1)
+                .in(!candidateShopIds.isEmpty(), "shop_id", candidateShopIds)
+                .in(!candidateVoucherIds.isEmpty(), "id", candidateVoucherIds)
                 .last("limit 50")
                 .list();
         if (vouchers.isEmpty()) {
@@ -148,6 +220,7 @@ public class AgentGuideServiceImpl implements AgentGuideService {
                 .in("id", shopIds)
                 .like(keyword != null && !keyword.isBlank(), "name", keyword)
                 .eq(typeId != null, "type_id", typeId)
+                .in(typeId == null && !candidateTypeIds.isEmpty(), "type_id", candidateTypeIds)
                 .le(maxAvgPrice != null, "avg_price", maxAvgPrice)
                 .orderByDesc("score")
                 .orderByDesc("sold")
@@ -160,6 +233,228 @@ public class AgentGuideServiceImpl implements AgentGuideService {
                     recommendation.setCouponHighlights(buildCouponHighlights(recommendation.getVouchers()));
                 })
                 .toList();
+    }
+
+    private void appendShopTypeDocs(List<AgentVectorDoc> docs, int limit) {
+        int remaining = remainingLimit(docs, limit);
+        if (remaining <= 0) {
+            return;
+        }
+        List<ShopType> shopTypes = shopTypeService.query()
+                .orderByAsc("sort")
+                .last("limit " + remaining)
+                .list();
+        for (ShopType shopType : shopTypes) {
+            AgentVectorDoc doc = newVectorDoc(
+                    "shop_type:" + shopType.getId(),
+                    "shop_type_alias",
+                    "shop_type",
+                    shopType.getId(),
+                    "tb_shop_type",
+                    String.valueOf(shopType.getId()),
+                    joinContent("shop type", shopType.getName(), "sort", shopType.getSort()),
+                    firstNonNull(shopType.getUpdateTime(), shopType.getCreateTime())
+            );
+            doc.setTypeId(shopType.getId());
+            putMetadata(doc, "name", shopType.getName());
+            putMetadata(doc, "sort", shopType.getSort());
+            docs.add(doc);
+        }
+    }
+
+    private void appendShopDocs(List<AgentVectorDoc> docs, int limit) {
+        int remaining = remainingLimit(docs, limit);
+        if (remaining <= 0) {
+            return;
+        }
+        List<Shop> shops = shopService.query()
+                .orderByDesc("update_time")
+                .last("limit " + remaining)
+                .list();
+        for (Shop shop : shops) {
+            AgentVectorDoc doc = newVectorDoc(
+                    "shop:" + shop.getId(),
+                    "shop_summary",
+                    "shop",
+                    shop.getId(),
+                    "tb_shop",
+                    String.valueOf(shop.getId()),
+                    joinContent(
+                            "shop", shop.getName(),
+                            "area", shop.getArea(),
+                            "address", shop.getAddress(),
+                            "type", shop.getTypeId(),
+                            "avg price", shop.getAvgPrice(),
+                            "score", shop.getScore(),
+                            "sold", shop.getSold(),
+                            "comments", shop.getComments(),
+                            "open hours", shop.getOpenHours()
+                    ),
+                    firstNonNull(shop.getUpdateTime(), shop.getCreateTime())
+            );
+            doc.setShopId(shop.getId());
+            doc.setTypeId(shop.getTypeId());
+            putMetadata(doc, "name", shop.getName());
+            putMetadata(doc, "area", shop.getArea());
+            putMetadata(doc, "address", shop.getAddress());
+            putMetadata(doc, "avgPrice", shop.getAvgPrice());
+            putMetadata(doc, "score", shop.getScore());
+            putMetadata(doc, "sold", shop.getSold());
+            putMetadata(doc, "comments", shop.getComments());
+            docs.add(doc);
+        }
+    }
+
+    private void appendVoucherDocs(List<AgentVectorDoc> docs, int limit) {
+        int remaining = remainingLimit(docs, limit);
+        if (remaining <= 0) {
+            return;
+        }
+        List<Voucher> vouchers = voucherService.query()
+                .eq("status", 1)
+                .orderByDesc("update_time")
+                .last("limit " + remaining)
+                .list();
+        for (Voucher voucher : vouchers) {
+            AgentVectorDoc doc = newVectorDoc(
+                    "voucher:" + voucher.getId(),
+                    "voucher_summary",
+                    "voucher",
+                    voucher.getId(),
+                    "tb_voucher",
+                    String.valueOf(voucher.getId()),
+                    joinContent(
+                            "voucher", voucher.getTitle(),
+                            voucher.getSubTitle(),
+                            "rules", voucher.getRules(),
+                            "shop", voucher.getShopId(),
+                            "pay", voucher.getPayValue(),
+                            "actual", voucher.getActualValue(),
+                            "type", voucher.getType()
+                    ),
+                    firstNonNull(voucher.getUpdateTime(), voucher.getCreateTime())
+            );
+            doc.setShopId(voucher.getShopId());
+            doc.setVoucherId(voucher.getId());
+            putMetadata(doc, "title", voucher.getTitle());
+            putMetadata(doc, "subTitle", voucher.getSubTitle());
+            putMetadata(doc, "rules", voucher.getRules());
+            putMetadata(doc, "payValue", voucher.getPayValue());
+            putMetadata(doc, "actualValue", voucher.getActualValue());
+            putMetadata(doc, "type", voucher.getType());
+            docs.add(doc);
+        }
+    }
+
+    private void appendBlogDocs(List<AgentVectorDoc> docs, int limit) {
+        int remaining = remainingLimit(docs, limit);
+        if (remaining <= 0) {
+            return;
+        }
+        List<Blog> blogs = blogService.query()
+                .orderByDesc("liked")
+                .orderByDesc("comments")
+                .last("limit " + remaining)
+                .list();
+        for (Blog blog : blogs) {
+            AgentVectorDoc doc = newVectorDoc(
+                    "blog:" + blog.getId(),
+                    "blog_summary",
+                    "blog",
+                    blog.getId(),
+                    "tb_blog",
+                    String.valueOf(blog.getId()),
+                    joinContent(
+                            "blog", blog.getTitle(),
+                            blog.getContent(),
+                            "shop", blog.getShopId(),
+                            "liked", blog.getLiked(),
+                            "comments", blog.getComments()
+                    ),
+                    firstNonNull(blog.getUpdateTime(), blog.getCreateTime())
+            );
+            doc.setShopId(blog.getShopId());
+            putMetadata(doc, "title", blog.getTitle());
+            putMetadata(doc, "liked", blog.getLiked());
+            putMetadata(doc, "comments", blog.getComments());
+            docs.add(doc);
+        }
+    }
+
+    private void appendFaqDocs(List<AgentVectorDoc> docs, int limit) {
+        addFaqDoc(docs, limit, "faq:coupon_subscription", "faq_knowledge", "coupon subscription reminder seckill voucher notification user can subscribe before start time and claim in voucher bag");
+        addFaqDoc(docs, limit, "faq:coupon_seckill", "faq_knowledge", "coupon seckill stock one user one voucher redis lua kafka async order voucher bag");
+        addFaqDoc(docs, limit, "faq:ai_guide", "faq_knowledge", "Smart Life AI guide can search shops vouchers budget reputation and explain recommendation reasons");
+    }
+
+    private void addFaqDoc(List<AgentVectorDoc> docs, int limit, String docId, String docType, String content) {
+        if (remainingLimit(docs, limit) <= 0) {
+            return;
+        }
+        docs.add(newVectorDoc(docId, docType, "faq", null, "agent_static_faq", docId, content, null));
+    }
+
+    private AgentVectorDoc newVectorDoc(
+            String docId,
+            String docType,
+            String entityType,
+            Long entityId,
+            String sourceTable,
+            String sourcePk,
+            String content,
+            java.time.LocalDateTime sourceUpdatedAt
+    ) {
+        AgentVectorDoc doc = new AgentVectorDoc();
+        doc.setDocId(docId);
+        doc.setDocType(docType);
+        doc.setEntityType(entityType);
+        doc.setEntityId(entityId);
+        doc.setSourceTable(sourceTable);
+        doc.setSourcePk(sourcePk);
+        doc.setContent(content);
+        doc.setSourceUpdatedAt(sourceUpdatedAt);
+        return doc;
+    }
+
+    private void putMetadata(AgentVectorDoc doc, String key, Object value) {
+        if (value != null) {
+            doc.getMetadata().put(key, value);
+        }
+    }
+
+    private String joinContent(Object... values) {
+        List<String> parts = new ArrayList<>();
+        for (Object value : values) {
+            if (value == null) {
+                continue;
+            }
+            String text = String.valueOf(value).trim();
+            if (!text.isBlank()) {
+                parts.add(text);
+            }
+        }
+        return String.join(" ", parts);
+    }
+
+    private int remainingLimit(List<AgentVectorDoc> docs, int limit) {
+        return Math.max(limit - docs.size(), 0);
+    }
+
+    private java.time.LocalDateTime firstNonNull(java.time.LocalDateTime first, java.time.LocalDateTime second) {
+        return first != null ? first : second;
+    }
+
+    private List<Long> normalizeIds(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        LinkedHashSet<Long> normalized = new LinkedHashSet<>();
+        for (Long id : ids) {
+            if (id != null && id > 0) {
+                normalized.add(id);
+            }
+        }
+        return new ArrayList<>(normalized);
     }
 
     @Override

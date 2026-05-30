@@ -4,6 +4,7 @@ import org.javaup.agent.dto.AgentChatRequest;
 import org.javaup.agent.dto.AgentChatResponse;
 import org.javaup.agent.dto.AgentRecommendation;
 import org.javaup.agent.dto.AgentToolRequest;
+import org.javaup.agent.dto.AgentVectorDoc;
 import org.javaup.agent.dto.AgentVoucherView;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -16,6 +17,8 @@ public interface AgentGuideService {
     SseEmitter streamChat(AgentChatRequest request, String authorization);
 
     List<AgentRecommendation> searchShops(AgentToolRequest request);
+
+    List<AgentVectorDoc> listVectorDocs();
 
     List<AgentVoucherView> queryShopVouchers(Long shopId);
 

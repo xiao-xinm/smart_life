@@ -9,6 +9,10 @@ dist/
 .npm-cache/
 __pycache__/
 *.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
 
 **/dependency-reduced-pom.xml
 

@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -9,11 +10,31 @@ from fastapi import FastAPI, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
+try:
+    from dotenv import load_dotenv
+
+    ROOT = Path(__file__).resolve().parents[1]
+    load_dotenv(ROOT / ".env.example")
+    load_dotenv(ROOT / ".env", override=True)
+except ImportError:
+    pass
+
+from app.rag import build_semantic_hints
+
 #运行uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 BACKEND_BASE_URL = os.getenv("SMART_LIFE_BACKEND_URL", "http://localhost:8081")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")
+DASHSCOPE_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+OPENAI_BASE_URL = (
+    os.getenv("OPENAI_BASE_URL")
+    or os.getenv("DASHSCOPE_BASE_URL")
+    or (DASHSCOPE_COMPATIBLE_BASE_URL if os.getenv("DASHSCOPE_API_KEY") else None)
+)
+OPENAI_API_KEY = (
+    os.getenv("DASHSCOPE_API_KEY")
+    if OPENAI_BASE_URL and "dashscope.aliyuncs.com" in OPENAI_BASE_URL and os.getenv("DASHSCOPE_API_KEY")
+    else os.getenv("OPENAI_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+)
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_STREAM_MODEL = os.getenv("OPENAI_STREAM_MODEL", OPENAI_MODEL)
 LOG_RAW_LLM_RESPONSE = os.getenv("SMART_LIFE_AGENT_LOG_RAW_RESPONSE", "false").lower() == "true"
@@ -109,6 +130,7 @@ class GuideContext(BaseModel):
     recommendations: list[Recommendation]
     maxAvgPrice: int | None = None
     requireVoucher: bool = False
+    semanticHints: dict[str, Any] = Field(default_factory=dict)
 
 
 @app.get("/health")
@@ -139,6 +161,7 @@ async def chat(
         recommendations,
         max_avg_price,
         require_voucher,
+        guide_context.semanticHints,
     )
     if agent_response is not None:
         return agent_response
@@ -160,7 +183,7 @@ async def chat(
             "推荐适合今晚去的店",
             "这张券售罄时帮我订阅提醒",
         ],
-        toolTrace=build_tool_trace(max_avg_price, require_voucher),
+        toolTrace=build_tool_trace(max_avg_price, require_voucher, guide_context.semanticHints),
     )
 
 
@@ -182,6 +205,8 @@ async def chat_stream(
 
             yield sse("trace", {"tool": "search_shops"})
             guide_context = await prepare_guide_context(request.message, headers)
+            if guide_context.semanticHints:
+                yield sse("trace", {"tool": "semantic_hints"})
             if guide_context.recommendations:
                 yield sse("trace", {"tool": "query_shop_vouchers"})
             if guide_context.maxAvgPrice:
@@ -202,8 +227,28 @@ async def prepare_guide_context(message: str, headers: dict[str, str]) -> GuideC
     keyword = extract_keyword(message)
     type_id = infer_type_id(message)
     max_avg_price = extract_budget(message)
-    require_voucher = wants_voucher(message) or wants_subscribe(message)
-    recommendations = await search_shops(keyword, type_id, max_avg_price, require_voucher, headers)
+    semantic_hints = await build_semantic_hints(message)
+    semantic_payload = {} if semantic_hints.is_empty() else semantic_hints.to_payload()
+    explicit_require_voucher = wants_voucher(message) or wants_subscribe(message)
+    require_voucher = explicit_require_voucher or semantic_hints.require_voucher
+    recommendations = await search_shops(
+        keyword,
+        type_id,
+        max_avg_price,
+        require_voucher,
+        headers,
+        semantic_hints.candidate_shop_ids,
+        semantic_hints.candidate_type_ids,
+        semantic_hints.candidate_voucher_ids,
+    )
+    if not recommendations and not semantic_hints.is_empty():
+        recommendations = await search_shops(
+            keyword,
+            type_id,
+            max_avg_price,
+            explicit_require_voucher,
+            headers,
+        )
     for recommendation in recommendations:
         recommendation.vouchers = await query_vouchers(recommendation.shopId, headers)
         recommendation.couponHighlights = build_coupon_highlights(recommendation.vouchers)
@@ -216,6 +261,7 @@ async def prepare_guide_context(message: str, headers: dict[str, str]) -> GuideC
         recommendations=recommendations,
         maxAvgPrice=max_avg_price,
         requireVoucher=require_voucher,
+        semanticHints=semantic_payload,
     )
 
 
@@ -225,6 +271,9 @@ async def search_shops(
     max_avg_price: int | None,
     require_voucher: bool,
     headers: dict[str, str],
+    candidate_shop_ids: list[int] | None = None,
+    candidate_type_ids: list[int] | None = None,
+    candidate_voucher_ids: list[int] | None = None,
 ) -> list[Recommendation]:
     payload = {
         "keyword": keyword,
@@ -233,6 +282,12 @@ async def search_shops(
         "maxAvgPrice": max_avg_price,
         "requireVoucher": require_voucher,
     }
+    if candidate_shop_ids:
+        payload["candidateShopIds"] = candidate_shop_ids
+    if candidate_type_ids:
+        payload["candidateTypeIds"] = candidate_type_ids
+    if candidate_voucher_ids:
+        payload["candidateVoucherIds"] = candidate_voucher_ids
     async with httpx.AsyncClient(timeout=10) as client:
         response = await client.post(
             f"{BACKEND_BASE_URL}/agent/tools/search-shops",
@@ -422,8 +477,15 @@ def wants_subscription_status(message: str) -> bool:
     return any(word in message for word in ["状态", "进度", "结果", "有没有订阅", "是否订阅", "查订阅", "查询订阅"])
 
 
-def build_tool_trace(max_avg_price: int | None, require_voucher: bool) -> list[str]:
-    trace = ["search_shops", "query_shop_vouchers", "analyze_reputation"]
+def build_tool_trace(
+    max_avg_price: int | None,
+    require_voucher: bool,
+    semantic_hints: dict[str, Any] | None = None,
+) -> list[str]:
+    trace = []
+    if semantic_hints:
+        trace.append("semantic_hints")
+    trace.extend(["search_shops", "query_shop_vouchers", "analyze_reputation"])
     if max_avg_price:
         trace.append(f"filter_budget:{max_avg_price}")
     if require_voucher:
@@ -499,7 +561,7 @@ def sse(event: str, data: Any) -> str:
 
 async def stream_agent_answer_events(message: str, guide_context: GuideContext):
     recommendations = guide_context.recommendations
-    trace = build_tool_trace(guide_context.maxAvgPrice, guide_context.requireVoucher)
+    trace = build_tool_trace(guide_context.maxAvgPrice, guide_context.requireVoucher, guide_context.semanticHints)
     if not recommendations:
         answer = (
             "我暂时没找到同时匹配需求且有优惠券的店，可以放宽品类或预算，我再帮你筛一轮。"
@@ -554,6 +616,7 @@ async def stream_agent_answer_events(message: str, guide_context: GuideContext):
             "max_avg_price": guide_context.maxAvgPrice,
             "require_voucher": guide_context.requireVoucher,
         },
+        "semantic_hints": guide_context.semanticHints,
         "recommendations": facts,
     }
 
@@ -597,6 +660,7 @@ async def stream_agent_answer_events(message: str, guide_context: GuideContext):
         recommendations,
         guide_context.maxAvgPrice,
         guide_context.requireVoucher,
+        guide_context.semanticHints,
     )
     if response is None:
         response = ChatResponse(
@@ -620,6 +684,7 @@ async def build_agent_response(
     recommendations: list[Recommendation],
     max_avg_price: int | None,
     require_voucher: bool,
+    semantic_hints: dict[str, Any] | None = None,
 ) -> ChatResponse | None:
     if not OPENAI_API_KEY or not recommendations:
         if not OPENAI_API_KEY:
@@ -646,6 +711,7 @@ async def build_agent_response(
             "max_avg_price": max_avg_price,
             "require_voucher": require_voucher,
         },
+        "semantic_hints": semantic_hints or {},
         "recommendations": facts,
     }
     system_prompt = (
@@ -702,7 +768,7 @@ async def build_agent_response(
         answer=parsed.get("answer") or "我按真实店铺和优惠券数据做了推荐，你可以先看推荐理由再决定。",
         recommendations=recommendations,
         suggestions=suggestions,
-        toolTrace=build_tool_trace(max_avg_price, require_voucher) + ["llm_coupon_explainer"],
+        toolTrace=build_tool_trace(max_avg_price, require_voucher, semantic_hints) + ["llm_coupon_explainer"],
     )
 
 

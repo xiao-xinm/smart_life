@@ -2,6 +2,8 @@ package org.javaup.agent.dto;
 
 import lombok.Data;
 
+import java.util.List;
+
 @Data
 public class AgentToolRequest {
 
@@ -18,4 +20,10 @@ public class AgentToolRequest {
     private Long shopId;
 
     private Long voucherId;
+
+    private List<Long> candidateShopIds;
+
+    private List<Long> candidateTypeIds;
+
+    private List<Long> candidateVoucherIds;
 }

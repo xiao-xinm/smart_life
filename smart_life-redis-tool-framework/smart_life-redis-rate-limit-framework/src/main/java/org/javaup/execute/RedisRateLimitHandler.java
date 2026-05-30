@@ -21,9 +21,8 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * @program: 黑马点评-plus升级版实战项目。添?阿星不是程序?微信，添加时备注 点评 来获取项目的完整资料
  * @description: 限流执行 接口实现
- * @author: 阿星不是程序? **/
+ * **/
 public class RedisRateLimitHandler implements RateLimitHandler {
 
     private final SeckillRateLimitConfigProperties seckillRateLimitConfigProperties;

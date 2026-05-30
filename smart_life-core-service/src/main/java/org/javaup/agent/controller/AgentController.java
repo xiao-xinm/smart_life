@@ -5,6 +5,7 @@ import org.javaup.agent.dto.AgentChatRequest;
 import org.javaup.agent.dto.AgentChatResponse;
 import org.javaup.agent.dto.AgentRecommendation;
 import org.javaup.agent.dto.AgentToolRequest;
+import org.javaup.agent.dto.AgentVectorDoc;
 import org.javaup.agent.dto.AgentVoucherView;
 import org.javaup.agent.service.AgentGuideService;
 import org.javaup.dto.Result;
@@ -47,6 +48,11 @@ public class AgentController {
     @PostMapping("/tools/search-shops")
     public Result<List<AgentRecommendation>> searchShops(@RequestBody AgentToolRequest request) {
         return Result.ok(agentGuideService.searchShops(request));
+    }
+
+    @GetMapping("/tools/rag/vector-docs")
+    public Result<List<AgentVectorDoc>> listVectorDocs() {
+        return Result.ok(agentGuideService.listVectorDocs());
     }
 
     @GetMapping("/tools/shop/{shopId}/vouchers")
