@@ -82,3 +82,4 @@ flowchart LR
 
 ## 2.2 扩展性的关键痛点
 ![](https://multimedia-javaup.cn/smart_life-plus/%E4%BC%98%E6%83%A0%E5%88%B8%E7%9A%84%E6%9F%A5%E8%AF%A2.png)
+
